@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Interactive installer for a sing-box Shadowsocks 2022 unlock server.
+# Interactive installer for a sing-box Shadowsocks unlock server.
 
 set -u
 set -o pipefail
 
 readonly PORT=18443
-readonly METHOD="2022-blake3-aes-128-gcm"
+readonly METHOD="chacha20-ietf-poly1305"
 readonly CONFIG_DIR="/etc/sing-box"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.json"
 
@@ -75,13 +75,25 @@ port_in_use() {
 tcp_udp_listening() {
   local listeners tcp_listeners udp_listeners
   listeners="$(port_listener_output || true)"
-  tcp_listeners="$(printf '%s\n' "${listeners}" | grep -E "^tcp.*:${PORT}([[:space:]]|$)" || true)"
-  udp_listeners="$(printf '%s\n' "${listeners}" | grep -E "^udp.*:${PORT}([[:space:]]|$)" || true)"
+  tcp_listeners="$(printf '%s\n' "${listeners}" | grep -E "^[[:space:]]*tcp.*:${PORT}([[:space:]]|$)" || true)"
+  udp_listeners="$(printf '%s\n' "${listeners}" | grep -E "^[[:space:]]*udp.*:${PORT}([[:space:]]|$)" || true)"
 
   if [[ -z "${tcp_listeners}" || -z "${udp_listeners}" ]]; then
     return 1
   fi
   printf '%s\n%s\n' "${tcp_listeners}" "${udp_listeners}"
+}
+
+wait_for_tcp_udp_listener() {
+  local attempt listeners
+  for attempt in {1..10}; do
+    if listeners="$(tcp_udp_listening)"; then
+      printf '%s\n' "${listeners}"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 restore_previous_config() {
@@ -165,11 +177,11 @@ setup_unlock_server() {
   fi
 
   password="$(run_sing_box generate rand --base64 16 2>/dev/null)" || {
-    error "生成 AES-128 密码失败。"
+    error "生成随机 Base64 密码失败。"
     return 1
   }
   if [[ ! "${password}" =~ ^[A-Za-z0-9+/]{22}==$ ]]; then
-    error "生成的密码格式异常，配置未修改。"
+    error "生成的 Base64 密码格式异常，配置未修改。"
     return 1
   fi
 
@@ -187,12 +199,6 @@ setup_unlock_server() {
       "listen_port": ${PORT},
       "method": "${METHOD}",
       "password": "${password}"
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
     }
   ]
 }
@@ -245,8 +251,10 @@ EOF
     return 1
   fi
 
-  if ! listeners="$(tcp_udp_listening)"; then
-    error "sing-box 未同时监听 ${PORT} 的 TCP 和 UDP 端口。"
+  info "正在等待 TCP/UDP 监听就绪（最长 10 秒）..."
+  if ! listeners="$(wait_for_tcp_udp_listener)"; then
+    error "sing-box 在 10 秒内未同时监听 ${PORT} 的 TCP 和 UDP 端口。"
+    printf '当前端口检测结果：\n%s\n' "$(port_listener_output || printf '未获取到 ss 输出')"
     restore_previous_config || true
     show_service_logs_hint
     return 1
@@ -265,7 +273,7 @@ EOF
   fi
   printf '端口：%s\n' "${PORT}"
   printf '加密方式：%s\n' "${METHOD}"
-  printf 'AES-128 密码：%s\n' "${password}"
+  printf 'Base64 密码：%s\n' "${password}"
   printf 'TCP/UDP 监听：正常\n'
   printf 'V2Board 中的端口、加密方式和密码必须与以上内容完全一致。\n'
   return 0
@@ -275,7 +283,7 @@ main() {
   local choice
   while true; do
     printf '\n========== 解锁机 sing-box 配置 ==========\n'
-    printf '1. 一键执行解锁机配置（生成并输出 AES-128 密码）\n'
+    printf '1. 一键执行解锁机配置（生成并输出 Shadowsocks 密码）\n'
     printf '2. 退出脚本\n\n'
     printf '请输入选项 [1-2]: '
     read -r choice || {
